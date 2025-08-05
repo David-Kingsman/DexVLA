@@ -7,12 +7,14 @@ from data_utils.utils import set_seed
 from policy_heads import *
 from qwen2_vla.utils.image_processing_qwen2_vla import *
 
-
+#  evaluate the Qwen2 VLA policy in the Agilex environment.
 def pre_process(robot_state_value, key, stats):
     tmp = robot_state_value
     tmp = (tmp - stats[key + '_mean']) / stats[key + '_std']
     return tmp
 
+import pdb; pdb.set_trace()
+# process observations and states
 def process_obs(obs, states, stats):
     """
     obs: three cameras' images

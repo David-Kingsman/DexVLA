@@ -82,7 +82,6 @@ python visualize_episodes_dexvla.py --dataset_dir data/rebar_insertion_hdf5/ --e
 If success, you will find the data in DexVLA/data/rebar_insertion_hdf5
  folder.
 
-
 ### Data Utils
 
 This step checks the integrity of the processed data before training
@@ -102,17 +101,6 @@ The Qwen2-VL 2B serves as the core of our architecture, providing robust capabil
 
 **❗❗** After downloading the standard weights, you have to replace the official "config.json" with our "configs/config.json" designed for VLA.
 
-```bash
-# Clone the Qwen2-VL-2B weights to the ~/models directory (4 GB)
-mkdir -p ~/DexVLA/models
-cd ~/models
-git lfs install   
-git clone https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct
-# The config provided by DexVLA overrides the official one
-cp /path/to/DexVLA/configs/config.json \
-   ~/models/Qwen2-VL-2B-Instruct/config.json
-```
-
 ### Download our pretrained ScaleDP-H weights(Stage 1)
 We released our pretrained weights of ScaleDP-H which is trained after Stage1. Now you can download the weights and directly finetuning your data on Stage 2.
 
@@ -122,7 +110,14 @@ We released our pretrained weights of ScaleDP-H which is trained after Stage1. N
 | ScaleDP-L (~400M) | [huggingface](https://huggingface.co/lesjie/scale_dp_l)  |
 
 ```bash
-git lfs install
+# Clone the Qwen2-VL-2B weights to the ~/models directory (4 GB)
+mkdir -p ~/DexVLA/models
+cd ~/models
+git lfs install   
+git clone https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct
+# The config provided by DexVLA overrides the official one
+cp /path/to/DexVLA/configs/config.json \
+   ~/models/Qwen2-VL-2B-Instruct/config.json
 # ScaleDP-H (~1B)
 git clone https://huggingface.co/lesjie/scale_dp_h
 # ScaleDP-L (~400M)
@@ -141,7 +136,6 @@ The training script are "scripts/stage2_train.sh" and "scripts/stage3_train.sh".
 Other hyperparameters like "batch_size", "save_steps" could be customized according to your computation resources.
 Start training by following commands:
 
-
 Train stage2. Training on large amount of tasks. And following hyper-parameters must be set as:
 1. **load_pretrain_dit** : True
 2. **DIT_PRETRAIN** :Path to pretrained policy head(ScaleDP).
@@ -149,6 +143,11 @@ Train stage2. Training on large amount of tasks. And following hyper-parameters 
 
 ```shell
 ./scripts/train_dexvla_stage2.sh 
+```
+
+After training of stage 2,check the training process on http://localhost:6006
+```shell
+tensorboard --logdir /home/zekaijin/DexVLA/output/qwen2_lora_rebar_insertion/log --port 6006
 ```
 
 Train stage3. Post-training on target dexterous tasks. And following hyper-parameters must be set as:
@@ -171,29 +170,18 @@ Copy "preprocessor_config.json" and "chat_template.json" into your own trained
 DexVLA dir. And must be put in target "checkpoint-XXXX" dir.
 ~~~
 Traceback (most recent call last):
-  File "/media/rl/HDD/projects/open_dexvla_preview/train_vla.py", line 320, in <module>
-    main(all_config=config, model_config=model_config)
-  File "/media/rl/HDD/projects/open_dexvla_preview/train_vla.py", line 282, in main
-    train_dataset, val_dataset, stats, sampler_params = load_data(dataset_dir, name_filter, camera_names, all_config['training_args'].per_device_train_batch_size,
-  File "/media/rl/HDD/projects/open_dexvla_preview/data_utils/utils.py", line 337, in load_data
-    train_dataset = EpisodicDataset(dataset_path_list, camera_names, norm_stats, train_episode_ids, train_episode_len, chunk_size, policy_class, robot=robot, llava_pythia_process=llava_pythia_process, data_args=config['data_args'])
-  File "/media/rl/HDD/projects/open_dexvla_preview/data_utils/utils.py", line 43, in __init__
-    a=self.__getitem__(0) # initialize self.is_sim and self.transformations
-  File "/media/rl/HDD/projects/open_dexvla_preview/data_utils/utils.py", line 191, in __getitem__
-    return self.llava_pythia_process.forward_process(sample, use_reasoning=self.data_args.use_reasoning)
-  File "/media/rl/HDD/projects/open_dexvla_preview/qwen2_vla/utils/robot_data_processor.py", line 87, in forward_process
-    model_inputs = self.multimodal_processor(
-  File "/home/rl/miniconda3/envs/opendexvla/lib/python3.8/site-packages/transformers/tokenization_utils_base.py", line 3016, in __call__
-    encodings = self._call_one(text=text, text_pair=text_pair, **all_kwargs)
-  File "/home/rl/miniconda3/envs/opendexvla/lib/python3.8/site-packages/transformers/tokenization_utils_base.py", line 3126, in _call_one
-    return self.encode_plus(
-  File "/home/rl/miniconda3/envs/opendexvla/lib/python3.8/site-packages/transformers/tokenization_utils_base.py", line 3202, in encode_plus
-    return self._encode_plus(
-  File "/home/rl/miniconda3/envs/opendexvla/lib/python3.8/site-packages/transformers/tokenization_utils_fast.py", line 603, in _encode_plus
-    batched_output = self._batch_encode_plus(
+......
 TypeError: _batch_encode_plus() got an unexpected keyword argument 'images'
 ~~~
+Your code passed the "images" parameter when calling the transformers tokenizer or processor.
+However, the tokenizer/processor version (or configuration) you used does not support the "images" parameter, resulting in an error.
+This is because multimodal models like Qwen2-VL require special "preprocessor_config.json" and "chat_template.json" files to support mixed text and image input.
+Copy the official preprocessor_config.json and chat_template.json files to your own training output directory (e.g., the checkpoint-XXXX folder).
 
+```shell
+cp /path/to/Qwen2-VL-2B-Instruct/preprocessor_config.json /your/checkpoint-dir/
+cp /path/to/Qwen2-VL-2B-Instruct/chat_template.json /your/checkpoint-dir/
+```
 
 ### 2. <font color=red>CUDA OOM</font>. 
 For OOM problem, we provide three ways to save CUDA memory. You can use only one solution or all of them. And here we listed the training speed, GPU memory for all three solutions.
