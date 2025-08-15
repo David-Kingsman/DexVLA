@@ -21,6 +21,8 @@ TASK_CONFIGS = {
     }
 }
 
+
+
 ### ALOHA fixed constants
 DT = 0.02
 JOINT_NAMES = ["waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate"]

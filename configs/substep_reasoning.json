@@ -1,17 +1,27 @@
 {
   "run001": {
     "fps": 10,                     
-    "total_frames": 70,       
+    "total_frames": 76,       
     "base_instruction": "Insert the rebar into the target position",
 
-    "substep_reasonings": [
-      { "start_frame": 0,  "end_frame": ,  "reasoning": "Hover and align the stirrup with the front and lower slots." },
-      { "start_frame": , "end_frame": , "reasoning": "Insert and push the stirrup through all slots" },
-      { "start_frame": , "end_frame": , "reasoning": "Seat the stirrup flush to complete insertion." },
-
+    "substep_reasonings": [ 
+      { "start_frame": 0,  "end_frame": 27,  "reasoning": "Hover and align the stirrup with the front and two lower slots." },
+      { "start_frame": 28, "end_frame": 62, "reasoning": "Insert and push the stirrup through all slots" },
+      { "start_frame": 63, "end_frame": 76, "reasoning": "Seat the stirrup flush to complete insertion." }
+    ],
+    "run002": {
+      "fps": 10,                     
+      "total_frames": 107,       
+      "base_instruction": "Insert the rebar into the target position",
+    
+      "substep_reasonings": [
+      { "start_frame": 0,  "end_frame": 42,  "reasoning": "Hover and align the stirrup with the front and two lower slots." },
+      { "start_frame": 43, "end_frame": 93, "reasoning": "Insert and push the stirrup through all slots" },
+      { "start_frame": 94, "end_frame": 107, "reasoning": "Seat the stirrup flush to complete insertion." }
     ]
 
 
-
+    
   }
 }
+  }

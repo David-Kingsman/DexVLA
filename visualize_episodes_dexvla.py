@@ -23,12 +23,14 @@ def load_hdf5(dataset_dir, dataset_name):
     with h5py.File(dataset_path, 'r') as root:
         is_sim = root.attrs['sim']
         qpos = root['/observations/qpos'][()]
-        FT_raw = root['/observations/FT_raw'][()]
-        FT_processed = root['/observations/FT_processed'][()]
+        # Check if FT_raw and FT_processed exist
+        FT_raw = root['/observations/FT_raw'][()] if 'FT_raw' in root['/observations'] else None
+        FT_processed = root['/observations/FT_processed'][()] if 'FT_processed' in root['/observations'] else None
         action = root['/action'][()]
         image_dict = dict()
         for cam_name in root[f'/observations/images/'].keys():
             image_dict[cam_name] = root[f'/observations/images/{cam_name}'][()]
+
 
     return qpos, action, image_dict, FT_raw, FT_processed
 
@@ -298,18 +300,19 @@ def visualize_language_info(language_raw, distill_bert_lang, plot_path=None):
     ax1.set_title("Language Instruction")
 
     # Display BERT feature heatmap
-    if distill_bert_lang.shape[0] > 0:
+    if distill_bert_lang is not None and distill_bert_lang.shape[0] > 0:
         bert_features = distill_bert_lang[0].reshape(-1, 1)
         im = ax2.imshow(bert_features.T, cmap='viridis', aspect='auto')
         ax2.set_title("BERT Language Features Heatmap")
         ax2.set_xlabel("Feature Dimension")
         plt.colorbar(im, ax=ax2)
-    
+    else:
+        print("distill_bert_lang not found or empty, skipping BERT feature visualization.")
     plt.tight_layout()
     plt.savefig(plot_path)
     print(f'Language info saved to: {plot_path}')
     plt.close()
-
+    
 def visualize_action_state_comparison(qpos, action, plot_path=None):
     """Visualize comparison between action commands and actual states"""
     fig, axes = plt.subplots(4, 2, figsize=(15, 12))
@@ -394,7 +397,7 @@ def main(args):
         dataset_path = os.path.join(dataset_dir, dataset_name + '.hdf5')
         with h5py.File(dataset_path, 'r') as root:
             language_raw = root['language_raw'][()]
-            distill_bert_lang = root['distill_bert_lang'][()]
+            distill_bert_lang = root['distill_bert_lang'][()] if 'distill_bert_lang' in root else None
 
         # Original visualizations
         if args['video']:

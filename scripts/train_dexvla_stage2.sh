@@ -13,26 +13,26 @@ MNOP=/home/zekaijin/DexVLA/models/Qwen2-VL-2B-Instruct
 TASKNAME=rebar_insertion
 
 # replace with your task name, e.g., rebar_insertion
-OUTPUT=/home/zekaijin/DexVLA/output/qwen2_lora_rebar_insertion_stage2
+OUTPUT=/home/zekaijin/DexVLA/output/qwen2_rebar_insertion_stage2
 
 # Create output directory if it does not exist
 mkdir -p $OUTPUT
 
-echo "=== start 4-GPU LoRA training  ==="
+echo "=== start 4-GPU without LoRA training  ==="
 echo "Configuration:"
 echo "- Number of GPUs: 4"
-echo "- LoRA: Enabled"
+echo "- LoRA: Disabled"
 echo "- Flash Attention: Disabled"
 echo "- Batch Size per GPU: 2"
-echo "- Total Batch Size: 64 (4 GPUs × 2 batch × 8 accumulation)"
+echo "- Total Batch Size: 64 (4 GPUs * 2 batch * 8 accumulation)"
 echo "- pretrained weights: ScaleDP_H"
 echo "- Output Directory: $OUTPUT"
 
 # training parameters 
 deepspeed --master_port 29604 --num_gpus=4 --num_nodes=1 ./train_vla.py \
   --deepspeed scripts/zero2.json \
-  --use_reasoning False \
-  --lora_enable True \
+  --use_reasoning True \
+  --lora_enable False \
   --action_dim 7 \
   --state_dim  7 \
   --flash_attn False \

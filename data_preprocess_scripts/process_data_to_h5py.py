@@ -8,6 +8,12 @@ import copy
 import sys
 # sys.path.append("/mnt/sda1/act") 
 # make the current NumPy’s core visible under the old name
+from transformers import BertTokenizer, BertModel
+import torch
+
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertModel.from_pretrained('bert-base-uncased')
+model.eval()
 
 """
 Convert the demos from Deoxys to hdf5 format used by ACT
@@ -447,6 +453,24 @@ for episode_idx, folder in enumerate(subfolders):
         # if we use BERT features, we can add dummy features here
         dummy_bert_features = np.zeros((1, 768))  # assuming BERT features are 768-dimensional
         root.create_dataset("distill_bert_lang", data=dummy_bert_features)
+
+        # Fill the datasets with data
+        substep_reasoning_str = "Insert the rebar into the target position"
+        substep_reasonings = [substep_reasoning_str] * valid_len
+        sub_reason_distilbert = []
+        with torch.no_grad():
+            for r in substep_reasonings:
+                inputs = tokenizer(r, return_tensors="pt")
+                outputs = model(**inputs)
+                emb = outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()  # (768,)
+                sub_reason_distilbert.append(emb.astype(np.float16))  # float16
+
+        sub_reason_distilbert = np.array(sub_reason_distilbert)  # (valid_len, 768)
+        sub_reason_distilbert = sub_reason_distilbert[:, None, :]  # (valid_len, 1, 768)
+
+
+        root.create_dataset("substep_reasonings", data=np.array(substep_reasonings, dtype=object))
+        root.create_dataset("sub_reason_distilbert", data=sub_reason_distilbert) 
 
         for name, array in data_dict.items():
             dataset_path = name
