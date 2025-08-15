@@ -59,19 +59,19 @@ def process_obs(obs, states, stats):
     cur_webcam_1 = obs['webcam_1']  # RGB
     cur_webcam_2 = obs['webcam_2']  # RGB
     assert np.max(cur_webcam_1) > 1, "All images must be 0-255."
-
-    traj_rgb_np = np.array([cur_webcam_1, cur_webcam_2])   # [2,H,W,3]
+    traj_rgb_np = np.array([cur_webcam_1, cur_webcam_2])   # [2,H,W,3] sequential must align with constants.py
     traj_rgb_np = np.expand_dims(traj_rgb_np, axis=1)      # [2,1,H,W,3]
     traj_rgb_np = np.transpose(traj_rgb_np, (1, 0, 4, 2, 3))  # [1,2,3,H,W]
 
     cur_state_np = pre_process(states, 'qpos', stats)
     cur_state = np.expand_dims(cur_state_np, axis=0)       # [1,7]
 
-    print("cur_state min/max:", np.min(cur_state), np.max(cur_state))
-    print('states.shape', states.shape)
-    print('qpos_mean.shape', stats['qpos_mean'].shape)
-    print('qpos_std.shape', stats['qpos_std'].shape)
-    return traj_rgb_np, cur_state
+    # print("cur_state min/max:", np.min(cur_state), np.max(cur_state))
+    # print('states.shape', states.shape)
+    # print('qpos_mean.shape', stats['qpos_mean'].shape)
+    # print('qpos_std.shape', stats['qpos_std'].shape)
+    
+    return traj_rgb_np, cur_state # images, states
 
 
 def time_ms():
@@ -106,7 +106,7 @@ class qwen2_vla_policy:
         if hasattr(self.policy, 'reasoning_film'):
             self.policy.reasoning_film.to(dtype=torch.float32)
 
-        # —— 统一把进入 Linear 的输入 cast 到该层权重的 dtype（防 dtype mismatch）——
+        # 统一把进入 Linear 的输入 cast 到该层权重的 dtype（防 dtype mismatch）——
         def _force_linear_input_dtype(mod, args):
             if not args:
                 return args
@@ -148,7 +148,7 @@ class qwen2_vla_policy:
                 return (x,)
             self.policy.policy_head.t_embedder.register_forward_pre_hook(_fix_t_emb_dtype)
 
-
+    # build the data structure for Droid2Qwen2VLA
     def datastruct_droid2qwen2vla(self, raw_lang):
         messages = [
             {     # two image slot
@@ -180,14 +180,14 @@ class qwen2_vla_policy:
     def process_batch_to_qwen2_vla(self, curr_image, robo_state, raw_lang):
         """
         curr_image: torch.Tensor [1,2,3,H,W] (0-255, RGB)
-        robo_state: torch.Tensor [1,7] (已在外面 .float().cuda())
+        robo_state: torch.Tensor [1,7] (.float().cuda())
         """
-        if len(curr_image.shape) == 5:
+        if len(curr_image.shape) == 5:   # 1,2,3,270,480
             curr_image = curr_image.squeeze(0)  # [2,3,H,W]
 
         messages = self.datastruct_droid2qwen2vla(raw_lang)
-        frames = torch.chunk(curr_image, curr_image.shape[0], dim=0)  # 2 个 [1,3,H,W]
-
+        frames = torch.chunk(curr_image, curr_image.shape[0], dim=0)  # webcam_1 webcam_2 [1,3,H,W]
+    
         image_list = []
         for each in frames:
             arr = each.detach().cpu().squeeze(0).permute(1, 2, 0).numpy().astype(np.uint8)  # HWC, RGB
@@ -207,7 +207,7 @@ class qwen2_vla_policy:
             return_tensors="pt",
         )
 
-        # device / dtype 对齐视觉塔
+        # device / dtype align with the visual model
         vis_param = next(self.policy.visual.parameters())
         dev = vis_param.device
         vis_dtype = vis_param.dtype
@@ -225,9 +225,10 @@ class qwen2_vla_policy:
 
 
 def eval_bc(policy, deploy_env, policy_config, raw_lang=None, query_frequency=16):
+
     assert raw_lang is not None, "raw lang is None!!!!!!"
     set_seed(0)
-    rand_crop_resize = False   # ✅ 推理不做随机裁剪/缩放
+    
     policy.policy.eval()
 
     stats_path = os.path.join("/".join(policy_config['model_path'].split('/')[:-1]), 'dataset_stats.pkl')
@@ -256,7 +257,7 @@ def eval_bc(policy, deploy_env, policy_config, raw_lang=None, query_frequency=16
 
             if t % query_frequency == 0:
                 curr_image = torch.from_numpy(traj_rgb_np).float().cuda()
-                # ❌ 不再做随机增广
+                # 不再做随机增广
                 batch = policy.process_batch_to_qwen2_vla(curr_image, robot_state, raw_lang)
                 if policy_config['tinyvla']:
                     all_actions, outputs = policy.policy.evaluate_tinyvla(**batch, is_eval=True, tokenizer=policy.tokenizer)
@@ -284,7 +285,7 @@ def eval_bc(policy, deploy_env, policy_config, raw_lang=None, query_frequency=16
             deploy_env.step(action.tolist())
 
 
-# xarm wrapper
+# xarm6 ufactory wrapper
 class XArm6DexVLAEnv:
     def __init__(self, arm_ip, camera_ids, camera_names, crop_list):
         self.arm = XArmAPI(arm_ip)
@@ -295,6 +296,7 @@ class XArm6DexVLAEnv:
         self.camera_ids = camera_ids
         self.camera_names = camera_names
         self.crop_list = crop_list
+        
         # start camera interfaces
         self.cam_interfaces = {}
         for idx, camera_id in enumerate(self.camera_ids):
@@ -331,13 +333,13 @@ class XArm6DexVLAEnv:
             img_rgb_raw = imgs_array["color"]
             img_rgb = img_rgb_raw[y1:y2, x1:x2]
 
-            # 保存每个 webcam 的图片
+            # save webcam images for debugging
             save_path = f"inference_sample_{self.camera_names[idx]}.jpg"
             cv2.imwrite(save_path, cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
 
             obs[self.camera_names[idx]] = img_rgb
 
-        # 机器人末端位姿（轴角），单位转成米
+        # robot state and gripper state unit mm and radian
         ee_state = np.array(self.arm.get_position_aa(is_radian=True)[1])
         ee_state[:3] /= 1000.0
         gripper_state = np.array([1])
@@ -381,12 +383,12 @@ if __name__ == '__main__':
     policy = qwen2_vla_policy(policy_config)
     
     # print some policy weights for debugging
-    print("ViT block 31 fc1 weight min/max:",
-          policy.policy.visual.blocks[31].mlp.fc1.weight.min().item(),
-          policy.policy.visual.blocks[31].mlp.fc1.weight.max().item())
-    print("ViT block 31 fc2 weight min/max:",
-          policy.policy.visual.blocks[31].mlp.fc2.weight.min().item(),
-          policy.policy.visual.blocks[31].mlp.fc2.weight.max().item())
+    # print("ViT block 31 fc1 weight min/max:",
+    #       policy.policy.visual.blocks[31].mlp.fc1.weight.min().item(),
+    #       policy.policy.visual.blocks[31].mlp.fc1.weight.max().item())
+    # print("ViT block 31 fc2 weight min/max:",
+    #       policy.policy.visual.blocks[31].mlp.fc2.weight.min().item(),
+    #       policy.policy.visual.blocks[31].mlp.fc2.weight.max().item())
 
 
     #######################################
