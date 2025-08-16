@@ -134,10 +134,10 @@ def get_norm_stats(dataset_path_list, rank0_print=print):
 
 
 if __name__ == "__main__":
-    # path = "/home/zekaijin/DexVLA/data/rebar_insertion_hdf5"  
+    path = "/home/zekaijin/DexVLA/data/rebar_insertion_hdf5"  
     # path = "/home/zekaijin/DexVLA/data/data_official/sim-grab_roller/Aloha-AgileX_domain_randomized-100"
     # path = "/home/zekaijin/DexVLA/data/data_official/dexcap data"
-    path = "/home/zekaijin/DexVLA/data/"
+    # path = "/home/zekaijin/DexVLA/data/"
 
     # Collect all HDF5 files in the specified directory
     dataset_path_list = []

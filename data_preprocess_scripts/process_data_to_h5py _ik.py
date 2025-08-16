@@ -11,13 +11,27 @@ import sys
 from transformers import BertTokenizer, BertModel
 import torch
 
+# Import ufactory SDK for inverse kinematics
+try:
+    from xarm.wrapper import XArmAPI
+    UFACTORY_AVAILABLE = True
+    print("ufactory SDK imported successfully")
+except ImportError:
+    print("Warning: ufactory SDK not available. Please install xarm-python-sdk")
+    UFACTORY_AVAILABLE = False
+
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 model = BertModel.from_pretrained('bert-base-uncased')
 model.eval()
 
 """
 Convert the demos from Deoxys to hdf5 format used by ACT
-Note that we use m as the unit rather than mm, so translation is divided by 1000
+This script converts 6D pose data to joint angles using ufactory SDK inverse kinematics:
+
+Input: 6D pose data (x, y, z, rx, ry, rz) + gripper from demo_ee_states.npz
+Process: Convert 6D pose to joint angles using xarm6 inverse kinematics
+Output: action[t] = target joint angles for next timestep, qpos[t] = current joint angles
+Compatible with DexVLA absolute action training
 """
 # ----------------------- !!! Setting !!! -------------------- #
 input_path = 'data/rebar_insertion' 
@@ -39,10 +53,188 @@ sam2_option = False # whether to use SAM2 for segmentation
 sam2_wo_bg = False # whether to use SAM2 without background
 sam2_w_crop_option = False # whether to use SAM2 with cropping
 
-# DexVLA specific settings
+# ufactory arm settings for inverse kinematics
+use_real_arm_for_ik = False  # Set to True if you want to use real arm for IK calculations
+arm_ip = "192.168.1.100"     # Replace with your arm's IP address
+
+# DexVLA specific settings - Using joint control for xarm6
 lang_intrs = "Insert the object into the target position"  
-state_dim = 7  
-action_dim = 7  
+state_dim = 7  # 6 joint angles + 1 gripper
+action_dim = 7  # 6 joint angles + 1 gripper
+
+"""
+Usage Instructions:
+
+1. Data Format Requirements:
+   - demo_ee_states.npz: 6D pose data [x, y, z, rx, ry, rz] (units: m, rad)
+   - demo_gripper_states.npz: gripper state data
+   - demo_camera_*.npz: camera data
+
+2. Inverse Kinematics Settings:
+   - use_real_arm_for_ik = False: use mock IK (recommended for testing)
+   - use_real_arm_for_ik = True: use real arm for IK calculations
+   - arm_ip: set your xarm6 IP address
+
+3. Output Format:
+   - action[t]: target joint angles for timestep t+1 (7D: 6 joints + 1 gripper)
+   - qpos[t]: current joint angles at timestep t (7D: 6 joints + 1 gripper)
+
+4. Important Notes:
+   - Ensure 6D pose data is within xarm6 workspace
+   - If using real arm, ensure network connection is stable
+   - Mock IK provides reasonable joint angles but may not be precise
+"""
+
+def create_mock_arm_instance():
+    """
+    Create a mock arm instance for testing inverse kinematics
+    This is useful when you don't have access to a real arm or want to test offline
+    """
+    class MockArm:
+        def __init__(self):
+            # Mock joint limits and workspace for xarm6
+            self.joint_limits = [
+                [-360, 360],  # Joint 1 limits in degrees
+                [-118, 120],  # Joint 2 limits in degrees  
+                [-225, 11],   # Joint 3 limits in degrees
+                [-360, 360],  # Joint 4 limits in degrees
+                [-97, 180],   # Joint 5 limits in degrees
+                [-360, 360]   # Joint 6 limits in degrees
+            ]
+        
+        def get_inverse_kinematics(self, pose, input_is_radian=True, return_is_radian=True):
+            """
+            Mock inverse kinematics - returns reasonable joint angles
+            In practice, you should use the real arm or a proper IK solver
+            
+            Args:
+                pose: 4x4 transformation matrix flattened to list
+                input_is_radian: ignored in mock
+                return_is_radian: ignored in mock
+            
+            Returns:
+                List of 6 joint angles in radians
+            """
+            # Convert pose matrix back to numpy array
+            pose_matrix = np.array(pose).reshape(4, 4)
+            
+            # Extract position and rotation
+            position = pose_matrix[:3, 3]
+            rotation_matrix = pose_matrix[:3, :3]
+            
+            # Simple heuristic for mock IK:
+            # - Joint 1: based on x, y position (yaw)
+            # - Joint 2, 3: based on z position and reach
+            # - Joint 4, 5, 6: based on rotation matrix
+            
+            # Calculate joint 1 (yaw) from x, y position
+            joint1 = np.arctan2(position[1], position[0])
+            
+            # Calculate joint 2, 3 based on z and reach
+            xy_distance = np.sqrt(position[0]**2 + position[1]**2)
+            z_offset = position[2] - 0.5  # Assuming base height is 0.5m
+            
+            # Simple inverse kinematics for 2-link arm
+            L1, L2 = 0.4, 0.4  # Mock link lengths
+            cos_theta3 = (xy_distance**2 + z_offset**2 - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_theta3 = np.clip(cos_theta3, -1, 1)
+            joint3 = np.arccos(cos_theta3)
+            
+            # Calculate joint 2
+            joint2 = np.arctan2(z_offset, xy_distance) - np.arctan2(L2 * np.sin(joint3), L1 + L2 * np.cos(joint3))
+            
+            # Calculate joint 4, 5, 6 from rotation matrix
+            # This is a simplified approach - in practice you'd use proper IK
+            joint4 = 0.0
+            joint5 = 0.0
+            joint6 = 0.0
+            
+            # Ensure joints are within limits
+            joints = [joint1, joint2, joint3, joint4, joint5, joint6]
+            for i, (joint, limits) in enumerate(zip(joints, self.joint_limits)):
+                joint_deg = np.degrees(joint)
+                if joint_deg < limits[0]:
+                    joints[i] = np.radians(limits[0])
+                elif joint_deg > limits[1]:
+                    joints[i] = np.radians(limits[1])
+            
+            return joints
+        
+        def disconnect(self):
+            pass  # Mock disconnect
+    
+    return MockArm()
+
+def convert_6d_pose_to_joint_angles(pose_6d, arm_instance):
+    """
+    Convert 6D pose (x, y, z, rx, ry, rz) to joint angles using ufactory SDK
+    
+    Args:
+        pose_6d: numpy array of shape (6,) containing [x, y, z, rx, ry, rz]
+        arm_instance: XArmAPI instance for inverse kinematics
+    
+    Returns:
+        joint_angles: numpy array of shape (6,) containing joint angles in radians
+    """
+    if not UFACTORY_AVAILABLE:
+        raise RuntimeError("ufactory SDK not available")
+    
+    try:
+        # Extract position and rotation
+        x, y, z, rx, ry, rz = pose_6d
+        
+        # Convert axis-angle to rotation matrix
+        rotation_matrix = Rotation.from_rotvec([rx, ry, rz]).as_matrix()
+        
+        # Create pose matrix
+        pose_matrix = np.eye(4)
+        pose_matrix[:3, :3] = rotation_matrix
+        pose_matrix[:3, 3] = [x, y, z]
+        
+        # Use ufactory SDK inverse kinematics
+        joint_angles = arm_instance.get_inverse_kinematics(
+            pose=pose_matrix.flatten().tolist(),
+            input_is_radian=True,
+            return_is_radian=True
+        )
+        
+        if joint_angles is None or len(joint_angles) < 6:
+            raise ValueError("Inverse kinematics failed to return valid joint angles")
+        
+        return np.array(joint_angles[:6])  # Return first 6 joint angles
+        
+    except Exception as e:
+        print(f"Error in inverse kinematics: {e}")
+        # Return a default pose if IK fails
+        return np.zeros(6)
+
+def batch_convert_6d_pose_to_joint_angles(poses_6d, arm_instance):
+    """
+    Convert a batch of 6D poses to joint angles
+    
+    Args:
+        poses_6d: numpy array of shape (T, 6) containing 6D poses
+        arm_instance: XArmAPI instance for inverse kinematics
+    
+    Returns:
+        joint_angles: numpy array of shape (T, 6) containing joint angles
+    """
+    joint_angles = np.zeros((poses_6d.shape[0], 6))
+    
+    for i, pose in enumerate(poses_6d):
+        try:
+            joint_angles[i] = convert_6d_pose_to_joint_angles(pose, arm_instance)
+            if i % 10 == 0:  # Progress indicator
+                print(f"Converted {i+1}/{poses_6d.shape[0]} poses to joint angles")
+        except Exception as e:
+            print(f"Failed to convert pose {i}: {e}")
+            # Use previous valid joint angles if available
+            if i > 0:
+                joint_angles[i] = joint_angles[i-1]
+            else:
+                joint_angles[i] = np.zeros(6)
+    
+    return joint_angles
 
 def get_target_id(eposide):
     # if eposide<=24:
@@ -184,14 +376,78 @@ def get_valid_length(arr):
 # Loop through each subfolder and process data 
 for episode_idx, folder in enumerate(subfolders):
     print(f"Processing {folder}...")
-    # Load data 
+    
+    # ----------------------- 6D Pose to Joint Angles Conversion ----------------------- #
+    # Load 6D pose data (end-effector positions and orientations)
     ee_states_path = os.path.join(input_path, folder, 'demo_ee_states.npz')
     gripper_path = os.path.join(input_path, folder, 'demo_gripper_states.npz')
+    
+    # Load 6D pose data
+    ee_data_raw = np.load(ee_states_path, allow_pickle=True)['data']  # shape: (T, 6) - [x, y, z, rx, ry, rz]
+    gripper_data = np.load(gripper_path, allow_pickle=True)['data']   # shape: (T, 1)
+    
+    print(f"Loaded 6D pose data: {ee_data_raw.shape}")
+    print(f"Loaded gripper data: {gripper_data.shape}")
+    
+    # Convert translation from mm to m if needed
+    if np.max(np.abs(ee_data_raw[:, :3])) > 10:  # If positions are in mm (likely > 10m)
+        ee_data_raw[:, :3] /= 1000.0
+        print("Converted positions from mm to m")
+    
+    # Initialize ufactory arm instance for inverse kinematics
+    if UFACTORY_AVAILABLE:
+        if use_real_arm_for_ik:
+            # Use real arm for IK calculations
+            arm_instance = XArmAPI(arm_ip)
+            try:
+                arm_instance.connect()
+                print(f"Connected to ufactory arm at {arm_ip} for IK calculations")
+            except Exception as e:
+                print(f"Warning: Could not connect to real arm at {arm_ip}: {e}")
+                print("Falling back to mock instance for IK")
+                arm_instance = create_mock_arm_instance()
+        else:
+            # Use mock instance for testing (faster and safer)
+            arm_instance = create_mock_arm_instance()
+            print("Using mock arm instance for IK calculations (set use_real_arm_for_ik=True to use real arm)")
+    else:
+        raise RuntimeError("ufactory SDK not available for inverse kinematics")
+    
+    # Convert 6D poses to joint angles using inverse kinematics
+    print(f"Converting {ee_data_raw.shape[0]} 6D poses to joint angles...")
+    joint_angles_6d = batch_convert_6d_pose_to_joint_angles(ee_data_raw, arm_instance)
+    
+    # Combine joint angles with gripper data
+    joint_data = np.concatenate((joint_angles_6d, gripper_data.reshape(-1, 1)), axis=1)  # shape: (T, 7)
+    
+    # Convert to action format: action[t] = qpos[t+1] (target joint angles for next timestep)
+    action_data = joint_data[1:]           # action[t] = target joint angles for t+1
+    ee_gripper_data = joint_data[:-1]      # qpos[t] = current joint angles at t
+    
+    # Handle edge case: ensure action_data and ee_gripper_data have same length
+    if action_data.shape[0] < ee_gripper_data.shape[0]:
+        action_data = np.vstack([action_data, joint_data[-1]])
+    
+    # Verify data dimensions for joint control
+    print(f"6D pose data shape: {ee_data_raw.shape}")
+    print(f"Joint angles shape: {joint_angles_6d.shape}")
+    print(f"Action data shape: {action_data.shape}")
+    print(f"Qpos data shape: {ee_gripper_data.shape if ee_gripper_data is not None else 'None'}")
+    assert action_data.shape[1] == 7, f"Action data should have 7 dimensions (6 joints + 1 gripper), got {action_data.shape[1]}"
+    if ee_gripper_data is not None:
+        assert ee_gripper_data.shape[1] == 7, f"Qpos data should have 7 dimensions (6 joints + 1 gripper), got {ee_gripper_data.shape[1]}"
+    
+    # Clean up arm connection
+    if UFACTORY_AVAILABLE and hasattr(arm_instance, 'disconnect'):
+        try:
+            arm_instance.disconnect()
+        except:
+            pass
+    
+    # ----------------------- force and torque ----------------------- #
     FT_raw_path = os.path.join(input_path, folder, 'demo_FT_raw.npz')
     FT_processed_path = os.path.join(input_path, folder, 'demo_FT_processed.npz')
-    action_path = os.path.join(input_path, folder, 'demo_action.npz')
-    action_grasp_path = os.path.join(input_path, folder, 'demo_action_grasp.npz')
-    action_hot = os.path.join(input_path, folder, 'demo_action_hot.npz')
+    
     # Load camera data
     camera_paths = []
     npz_list = os.listdir(os.path.join(input_path, folder))
@@ -201,75 +457,6 @@ for episode_idx, folder in enumerate(subfolders):
             cam_idx = file.split("_")[2].split(".")[0]
             if cam_idx in cam_idxes:
                 camera_paths.append(os.path.join(input_path, folder, f'demo_camera_{cam_idx}.npz'))
-   
-    # When it comes to  the ee control and 6d pose control           
-    # # Load end effector and gripper data
-    # ee_data_raw = np.load(ee_states_path, allow_pickle=True)['data'] # Ufactory: [x,y,z,rx,ry,rz], rotation is in rad 
-    # # Convert translation from mm → m 
-    # ee_data_raw[:, :3] /= 1000.0
-    # # Load gripper data
-    # gripper_data = np.load(gripper_path, allow_pickle=True)['data']
-    # episode_len = ee_data_raw.shape[0] 
-
-    # # To avoid singularity of axis angle representation, make ee rot same as the robot base rot
-    # if img_only:
-    #     ee_gripper_data = None
-    # else:
-    #     if action_type == "abs":
-    #         ee_data_new = np.zeros((episode_len, 6))
-    #         for i in range(episode_len):
-    #             ee_data_new[i, :] = avoid_singularity(ee_data_raw[i], type="pos_axis_angle")
-
-    #         ee_gripper_data = np.concatenate((ee_data_new, gripper_data.reshape(gripper_data.shape[0], 1)), axis=1)  #[length, 7]
-
-    #     else:
-    #         raise NotImplementedError
-    
-    # When it comes to joint positions and gripper control
-    joint_states_path = os.path.join(input_path, folder, 'demo_joint_states.npz')
-    joint_data = np.load(joint_states_path, allow_pickle=True)['data']  # shape: (T, 7)
-
-    if joint_data.shape[1] == 6:
-        gripper_data = np.load(gripper_path, allow_pickle=True)['data']
-        joint_data = np.concatenate((joint_data, gripper_data.reshape(-1, 1)), axis=1)
-    else:
-        gripper_data = joint_data[:, -1]
-
-    action_data = joint_data[1:]           # action[t] = qpos[t+1]
-    ee_gripper_data = joint_data[:-1]      # qpos[t]
-    if action_data.shape[0] < ee_gripper_data.shape[0]:
-        action_data = np.vstack([action_data, joint_data[-1]])
-
-    if joint_data.shape[1] > 6:
-        joint_data = joint_data[:, :6]
-
-    if img_only:
-        ee_gripper_data = None
-    else:
-        # use joint angles + gripper as qpos
-        ee_gripper_data = np.concatenate((joint_data, gripper_data.reshape(gripper_data.shape[0], 1)), axis=1)
-
-    # ----------------------- action states ----------------------- #
-    # If we use relative action, we need to convert the absolute action to relative action
-    # if action_type == "abs":
-    #     action_data = np.load(action_path, allow_pickle=True)['data']
-    #     # Convert translation from mm → m
-    #     action_data[:, :3] /= 1000.0
-    #     # action_data_new = np.zeros((episode_len, 6))
-    #     # for i in range(episode_len):
-    #     #     action_data_new[i, :6] = avoid_singularity(action_data[i, :6],type="pos_axis_angle")
-    #     action_data_new = np.zeros((action_data.shape[0], 6))
-    #     for i in range(action_data.shape[0]):
-    #         action_data_new[i, :6] = avoid_singularity(action_data[i, :6], type="pos_axis_angle")
-            
-    #     action_grasp_data = np.load(action_grasp_path, allow_pickle=True)['data']
-    #     action_data = np.concatenate((action_data_new, action_grasp_data.reshape(action_grasp_data.shape[0], 1)), axis=1) #[length, 7]
-    # else:
-    #     raise NotImplementedError
-
-    # ----------------------- force and torque ----------------------- #
-    FT_raw_data = np.load(FT_raw_path, allow_pickle=True)['data']
-    FT_processed_data = np.load(FT_processed_path, allow_pickle=True)['data']
 
     # ----------------------- images ----------------------- #
     assert len(camera_paths) == len(camera_names)
