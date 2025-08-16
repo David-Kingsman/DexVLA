@@ -56,7 +56,6 @@ def get_target_id(eposide):
 #     else:
 #         return "rebar2"
 
-
 os.makedirs(output_path, exist_ok=True)
 # Search all subfolders starting with "run" and sort them
 subfolders = sorted([folder for folder in os.listdir(input_path) if folder.startswith('run') and os.path.isdir(os.path.join(input_path, folder))])
@@ -202,27 +201,44 @@ for episode_idx, folder in enumerate(subfolders):
             cam_idx = file.split("_")[2].split(".")[0]
             if cam_idx in cam_idxes:
                 camera_paths.append(os.path.join(input_path, folder, f'demo_camera_{cam_idx}.npz'))
-    # Load end effector and gripper data
-    ee_data_raw = np.load(ee_states_path, allow_pickle=True)['data'] # Ufactory: [x,y,z,rx,ry,rz], rotation is in rad 
-    # Convert translation from mm → m 
-    ee_data_raw[:, :3] /= 1000.0
-    # Load gripper data
-    gripper_data = np.load(gripper_path, allow_pickle=True)['data']
-    episode_len = ee_data_raw.shape[0] 
+   
+    # When it comes to  the ee control and 6d pose control           
+    # # Load end effector and gripper data
+    # ee_data_raw = np.load(ee_states_path, allow_pickle=True)['data'] # Ufactory: [x,y,z,rx,ry,rz], rotation is in rad 
+    # # Convert translation from mm → m 
+    # ee_data_raw[:, :3] /= 1000.0
+    # # Load gripper data
+    # gripper_data = np.load(gripper_path, allow_pickle=True)['data']
+    # episode_len = ee_data_raw.shape[0] 
 
-    # To avoid singularity of axis angle representation, make ee rot same as the robot base rot
+    # # To avoid singularity of axis angle representation, make ee rot same as the robot base rot
+    # if img_only:
+    #     ee_gripper_data = None
+    # else:
+    #     if action_type == "abs":
+    #         ee_data_new = np.zeros((episode_len, 6))
+    #         for i in range(episode_len):
+    #             ee_data_new[i, :] = avoid_singularity(ee_data_raw[i], type="pos_axis_angle")
+
+    #         ee_gripper_data = np.concatenate((ee_data_new, gripper_data.reshape(gripper_data.shape[0], 1)), axis=1)  #[length, 7]
+
+    #     else:
+    #         raise NotImplementedError
+    
+    # When it comes to joint positions and gripper control
+    joint_states_path = os.path.join(input_path, folder, 'demo_joint_states.npz')
+    joint_data = np.load(joint_states_path, allow_pickle=True)['data']  # shape: (T, 6) or (T, 7)
+    gripper_data = np.load(gripper_path, allow_pickle=True)['data']
+    episode_len = joint_data.shape[0]
+
+    if joint_data.shape[1] > 6:
+        joint_data = joint_data[:, :6]
+
     if img_only:
         ee_gripper_data = None
     else:
-        if action_type == "abs":
-            ee_data_new = np.zeros((episode_len, 6))
-            for i in range(episode_len):
-                ee_data_new[i, :] = avoid_singularity(ee_data_raw[i], type="pos_axis_angle")
-
-            ee_gripper_data = np.concatenate((ee_data_new, gripper_data.reshape(gripper_data.shape[0], 1)), axis=1)  #[length, 7]
-
-        else:
-            raise NotImplementedError
+        # use joint angles + gripper as qpos
+        ee_gripper_data = np.concatenate((joint_data, gripper_data.reshape(gripper_data.shape[0], 1)), axis=1)
 
     # ----------------------- action states ----------------------- #
     # If we use relative action, we need to convert the absolute action to relative action
