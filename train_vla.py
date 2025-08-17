@@ -32,7 +32,7 @@ from aloha_scripts.utils import *
 class ActionHeadArguments:
     policy_head_type: str = field(default="scale_dp_policy") # or unet_diffusion_policy
     policy_head_size: str = field(default="ScaleDP_H") # ScaleDP_XL, ScaleDP_L, ScaleDP_B, ScaleDP_S
-    state_dim: int = 7 # state dimension
+    state_dim: int = 10 # state dimension
     action_dim: int = 10 # action dimension
 
 

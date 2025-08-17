@@ -21,7 +21,7 @@ from PIL import Image
 
 
 import os, sys
-LOG_PATH = "/home/zekaijin/DexVLA/inference log.log"
+LOG_PATH = "/home/zekaijin/DexVLA/inference_log_joint.log"
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 class Tee:
@@ -51,10 +51,10 @@ def pre_process(robot_state_value, key, stats, eps=1e-6, clip=10.0):
 def process_obs(obs, states, stats):
     """
     obs: two cameras' images（RGB, uint8, 0-255）
-    states: Tensor, robot states (10-dimensional: 3D translation + 6D Euler angles + 1D gripper)
+    states: Tensor, robot states (7-dimensional: 6 joint angles + 1 gripper)
     stats: mean, std of robot states and actions
     This function is used to get observations(images and robot states) in your robot environment.
-    returns: images[B=1,T=2,C,H,W], states[B,10]
+    returns: images[B=1,T=2,C,H,W], states[B,7]
     """
     cur_webcam_1 = obs['webcam_1']  # RGB
     cur_webcam_2 = obs['webcam_2']  # RGB
@@ -63,9 +63,9 @@ def process_obs(obs, states, stats):
     traj_rgb_np = np.expand_dims(traj_rgb_np, axis=1)      # [2,1,H,W,3]
     traj_rgb_np = np.transpose(traj_rgb_np, (1, 0, 4, 2, 3))  # [1,2,3,H,W]
 
-    # 处理10维状态数据
+    # 处理7维关节状态数据
     cur_state_np = pre_process(states, 'qpos', stats)
-    cur_state = np.expand_dims(cur_state_np, axis=0)       # [1,10]
+    cur_state = np.expand_dims(cur_state_np, axis=0)       # [1,7]
 
     print("cur_state min/max:", np.min(cur_state), np.max(cur_state))
     print('states.shape', states.shape)
@@ -181,7 +181,7 @@ class qwen2_vla_policy:
     def process_batch_to_qwen2_vla(self, curr_image, robo_state, raw_lang):
         """
         curr_image: torch.Tensor [1,2,3,H,W] (0-255, RGB)
-        robo_state: torch.Tensor [1,7] (.float().cuda())
+        robo_state: torch.Tensor [1,7] (.float().cuda()) - 6 joint angles + 1 gripper
         """
         if len(curr_image.shape) == 5:   # 1,2,3,270,480
             curr_image = curr_image.squeeze(0)  # [2,3,H,W]
@@ -286,14 +286,14 @@ def eval_bc(policy, deploy_env, policy_config, raw_lang=None, query_frequency=16
             deploy_env.step(action.tolist())
 
 
-# xarm6 ufactory wrapper
-class XArm6DexVLAEnv:
+# xarm6 ufactory wrapper for JOINT CONTROL (7-dimensional)
+class XArm6DexVLAEnvJoint:
     def __init__(self, arm_ip, camera_ids, camera_names, crop_list):
         self.arm = XArmAPI(arm_ip)
         self.arm.motion_enable(enable=True)
         self.arm.set_mode(1)
         self.arm.set_state(0)
-        print("Start reset")
+        print("Start reset - JOINT CONTROL MODE")
         self.camera_ids = camera_ids
         self.camera_names = camera_names
         self.crop_list = crop_list
@@ -316,32 +316,22 @@ class XArm6DexVLAEnv:
         print("Reset to home position.")
 
     def step(self, action):
-        # action: [tx, ty, tz, roll1, pitch1, yaw1, roll2, pitch2, yaw2, g] (10D DexVLA format)
-        # 需要转换为joint angles进行控制
+        # action: [j1, j2, j3, j4, j5, j6, gripper] (7D joint angles)
+        # 直接设置关节角度
+        target_joints = np.array(action[:6])  # 前6个是关节角度 (rad)
+        gripper_value = action[6]  # 第7个是夹爪
         
-        # 提取pose信息 (前9维)
-        pose_6d = action[:9]  # [tx, ty, tz, roll1, pitch1, yaw1, roll2, pitch2, yaw2]
+        print(f"Execute joint action: {target_joints} (rad)")
+        print(f"Gripper value: {gripper_value}")
         
-        # 转换为6D pose格式 (取前6维：3D平移 + 3D欧拉角)
-        target_pose = np.zeros(6)
-        target_pose[:3] = pose_6d[:3]  # 3D平移 (m)
-        target_pose[3:6] = pose_6d[3:6]  # 前3个欧拉角 (rad)
-        
-        # 转换为mm单位
-        target_pose[:3] *= 1000.0  # m → mm
-        
-        # 使用IK计算joint angles
         try:
-            # 设置目标位姿
-            self.arm.set_position_aa(target_pose, speed=20, mvacc=200, is_radian=True, wait=True)
-            print(f"Executed pose action: {target_pose}")
+            # 设置关节角度
+            self.arm.set_servo_angle_j(target_joints, is_radian=True, wait=True)
+            print(f"Joint angles set successfully")
         except Exception as e:
-            print(f"Pose control failed: {e}")
-            # 如果pose control失败，可以尝试直接设置joint angles
-            # 这里需要根据您的具体需求实现
+            print(f"Joint control failed: {e}")
         
-        # 控制夹爪 (第10维)
-        gripper_value = action[9]
+        # 控制夹爪
         if gripper_value > 0.5:  # 根据您的夹爪编码逻辑调整
             print("Gripper: Close")
             # self.arm.set_gripper_position(0, wait=True)  # 闭合
@@ -360,43 +350,31 @@ class XArm6DexVLAEnv:
             img_rgb = img_rgb_raw[y1:y2, x1:x2]
 
             # save webcam images for debugging
-            save_path = f"inference_sample_{self.camera_names[idx]}.jpg"
+            save_path = f"inference_sample_joint_{self.camera_names[idx]}.jpg"
             cv2.imwrite(save_path, cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
 
             obs[self.camera_names[idx]] = img_rgb
 
-        # robot state: 10-dimensional [tx, ty, tz, roll1, pitch1, yaw1, roll2, pitch2, yaw2, g]
-        ee_state = np.array(self.arm.get_position_aa(is_radian=True)[1])  # [x, y, z, rx, ry, rz]
-        ee_state[:3] /= 1000.0  # mm → m
+        # robot state: 7-dimensional [j1, j2, j3, j4, j5, j6, g] (joint angles + gripper)
+        joint_angles = np.array(self.arm.get_servo_angle(is_radian=True)[1])  # [j1, j2, j3, j4, j5, j6]
         
-        # 转换为10维状态：3D平移 + 6D欧拉角 + 1D夹爪
-        states_10d = np.zeros(10)
-        states_10d[:3] = ee_state[:3]  # 3D平移 (m)
-        
-        # 将轴角转换为6D欧拉角 (与训练时保持一致)
-        from scipy.spatial.transform import Rotation
-        axis_angle = ee_state[3:6]  # [rx, ry, rz]
-        rotation_matrix = Rotation.from_rotvec(axis_angle).as_matrix()
-        euler_angles = Rotation.from_matrix(rotation_matrix).as_euler('zyx', degrees=False)
-        euler_6d = np.concatenate([euler_angles, euler_angles])  # 6D欧拉角
-        states_10d[3:9] = euler_6d
-        
-        # 夹爪状态 (第10维)
+        # 夹爪状态 (第7维)
         gripper_state = np.array([1])  # 根据您的夹爪编码逻辑调整
-        states_10d[9] = gripper_state[0]
         
-        print(f"Current 10D state: {states_10d}")
-        print(f"  Translation (m): {states_10d[:3]}")
-        print(f"  6D Euler angles (rad): {states_10d[3:9]}")
-        print(f"  Gripper: {states_10d[9]}")
+        # 组合7维状态
+        states_7d = np.concatenate([joint_angles, gripper_state])
+        
+        print(f"Current 7D joint state: {states_7d}")
+        print(f"  Joint angles (rad): {states_7d[:6]}")
+        print(f"  Gripper: {states_7d[6]}")
 
         return {
             'webcam_1': obs['webcam_1'],
             'webcam_2': obs['webcam_2'],
-        }, states_10d
+        }, states_7d
 
 
-# ========== XArm6DexVLAEnv ==========
+# ========== XArm6DexVLAEnvJoint ==========
 if __name__ == '__main__':
      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>hyper parameters<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     action_head = 'scale_dp_policy'  # or 'unet_diffusion_policy'
@@ -421,7 +399,7 @@ if __name__ == '__main__':
     camera_names = ['webcam_1', 'webcam_2']
     crop_list = [700, 200, 1220, 900]  # your actual crop settings
 
-    xarm_bot = XArm6DexVLAEnv(arm_ip, camera_ids, camera_names, crop_list)
+    xarm_bot = XArm6DexVLAEnvJoint(arm_ip, camera_ids, camera_names, crop_list)
     # xarm_bot.reset()
 
     #### 3. Load DexVLA####################
@@ -452,4 +430,4 @@ if __name__ == '__main__':
     #         print("Loaded weight shape:", weights[k].shape)
     #         print("policy_head.blocks[0].mlp.fc1.weight nan:", torch.isnan(policy.policy.policy_head.blocks[0].mlp.fc1.weight).any())
 import atexit
-atexit.register(_log_fp.close)
+atexit.register(_log_fp.close) 

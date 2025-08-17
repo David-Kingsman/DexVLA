@@ -21,7 +21,7 @@ from PIL import Image
 
 
 import os, sys
-LOG_PATH = "/home/zekaijin/DexVLA/inference log.log"
+LOG_PATH = "/home/zekaijin/DexVLA/inference_log_10dim.log"
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 class Tee:
@@ -181,7 +181,7 @@ class qwen2_vla_policy:
     def process_batch_to_qwen2_vla(self, curr_image, robo_state, raw_lang):
         """
         curr_image: torch.Tensor [1,2,3,H,W] (0-255, RGB)
-        robo_state: torch.Tensor [1,7] (.float().cuda())
+        robo_state: torch.Tensor [1,10] (.float().cuda()) - 3D translation + 6D Euler angles + 1D gripper
         """
         if len(curr_image.shape) == 5:   # 1,2,3,270,480
             curr_image = curr_image.squeeze(0)  # [2,3,H,W]
@@ -286,14 +286,14 @@ def eval_bc(policy, deploy_env, policy_config, raw_lang=None, query_frequency=16
             deploy_env.step(action.tolist())
 
 
-# xarm6 ufactory wrapper
-class XArm6DexVLAEnv:
+# xarm6 ufactory wrapper for POSE CONTROL (10-dimensional)
+class XArm6DexVLAEnv10Dim:
     def __init__(self, arm_ip, camera_ids, camera_names, crop_list):
         self.arm = XArmAPI(arm_ip)
         self.arm.motion_enable(enable=True)
         self.arm.set_mode(1)
         self.arm.set_state(0)
-        print("Start reset")
+        print("Start reset - POSE CONTROL MODE (10D)")
         self.camera_ids = camera_ids
         self.camera_names = camera_names
         self.crop_list = crop_list
@@ -317,7 +317,7 @@ class XArm6DexVLAEnv:
 
     def step(self, action):
         # action: [tx, ty, tz, roll1, pitch1, yaw1, roll2, pitch2, yaw2, g] (10D DexVLA format)
-        # 需要转换为joint angles进行控制
+        # 需要转换为6D pose进行控制
         
         # 提取pose信息 (前9维)
         pose_6d = action[:9]  # [tx, ty, tz, roll1, pitch1, yaw1, roll2, pitch2, yaw2]
@@ -330,11 +330,16 @@ class XArm6DexVLAEnv:
         # 转换为mm单位
         target_pose[:3] *= 1000.0  # m → mm
         
-        # 使用IK计算joint angles
+        print(f"Execute 10D action: {action}")
+        print(f"  Translation (m): {target_pose[:3]/1000.0}")
+        print(f"  Euler angles (rad): {target_pose[3:6]}")
+        print(f"  Gripper: {action[9]}")
+        
+        # 使用IK计算joint angles (自动)
         try:
-            # 设置目标位姿
+            # 设置目标位姿，自动进行IK求解
             self.arm.set_position_aa(target_pose, speed=20, mvacc=200, is_radian=True, wait=True)
-            print(f"Executed pose action: {target_pose}")
+            print(f"Pose control executed successfully")
         except Exception as e:
             print(f"Pose control failed: {e}")
             # 如果pose control失败，可以尝试直接设置joint angles
@@ -360,7 +365,7 @@ class XArm6DexVLAEnv:
             img_rgb = img_rgb_raw[y1:y2, x1:x2]
 
             # save webcam images for debugging
-            save_path = f"inference_sample_{self.camera_names[idx]}.jpg"
+            save_path = f"inference_sample_10dim_{self.camera_names[idx]}.jpg"
             cv2.imwrite(save_path, cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
 
             obs[self.camera_names[idx]] = img_rgb
@@ -396,7 +401,7 @@ class XArm6DexVLAEnv:
         }, states_10d
 
 
-# ========== XArm6DexVLAEnv ==========
+# ========== XArm6DexVLAEnv10Dim ==========
 if __name__ == '__main__':
      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>hyper parameters<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
     action_head = 'scale_dp_policy'  # or 'unet_diffusion_policy'
@@ -421,7 +426,7 @@ if __name__ == '__main__':
     camera_names = ['webcam_1', 'webcam_2']
     crop_list = [700, 200, 1220, 900]  # your actual crop settings
 
-    xarm_bot = XArm6DexVLAEnv(arm_ip, camera_ids, camera_names, crop_list)
+    xarm_bot = XArm6DexVLAEnv10Dim(arm_ip, camera_ids, camera_names, crop_list)
     # xarm_bot.reset()
 
     #### 3. Load DexVLA####################
@@ -448,8 +453,7 @@ if __name__ == '__main__':
     # weights = torch.load("/home/zekaijin/DexVLA/output/qwen2_lora_rebar_insertion_stage2/checkpoint-2000/non_lora_trainables.bin")
     # for k in weights:
     #     if "policy_head.blocks.0.mlp.fc1.weight" in k:
-    #         print(weights[k].flatten()[:10])
-    #         print("Loaded weight shape:", weights[k].shape)
+    #         print(f"Loaded weight shape: {weights[k].shape}")
     #         print("policy_head.blocks[0].mlp.fc1.weight nan:", torch.isnan(policy.policy.policy_head.blocks[0].mlp.fc1.weight).any())
 import atexit
-atexit.register(_log_fp.close)
+atexit.register(_log_fp.close) 
